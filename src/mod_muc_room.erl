@@ -72,12 +72,12 @@
 
 %% Module start with or without supervisor:
 -ifdef(NO_TRANSIENT_SUPERVISORS).
--define(SUPERVISOR_START, 
+-define(SUPERVISOR_START,
 	gen_fsm:start(?MODULE, [Host, ServerHost, Access, Room, HistorySize,
 				RoomShaper, Creator, Nick, DefRoomOpts],
 		      ?FSMOPTS)).
 -else.
--define(SUPERVISOR_START, 
+-define(SUPERVISOR_START,
 	Supervisor = gen_mod:get_module_proc(ServerHost, ejabberd_mod_muc_sup),
 	supervisor:start_child(
 	  Supervisor, [Host, ServerHost, Access, Room, HistorySize, RoomShaper,
@@ -137,7 +137,7 @@ init([Host, ServerHost, Access, Room, HistorySize, RoomShaper, Creator, _Nick, D
 			      make_opts(State1));
        true -> ok
     end,
-    ?INFO_MSG("Created MUC room ~s@~s by ~s", 
+    ?INFO_MSG("Created MUC room ~s@~s by ~s",
 	      [Room, Host, jlib:jid_to_string(Creator)]),
     add_to_log(room_existence, created, State1),
     add_to_log(room_existence, started, State1),
@@ -274,34 +274,40 @@ normal_state({route, From, <<"">>,
 		IsVoiceApprovement = is_voice_approvement(Els) and
 				       not is_visitor(From, StateData),
 		if IsInvitation ->
-		       case catch check_invitation(From, Els, Lang, StateData)
-			   of
+			case catch check_invitation(From, Els, Lang, StateData) of
 			 {error, Error} ->
 			     Err = jlib:make_error_reply(Packet, Error),
 			     ejabberd_router:route(StateData#state.jid, From, Err),
 			     {next_state, normal_state, StateData};
-			 IJID ->
+			 {ok, IJIDs} ->
 			     Config = StateData#state.config,
 			     case Config#config.members_only of
-			       true ->
-				   case get_affiliation(IJID, StateData) of
-				     none ->
-					 NSD = set_affiliation(IJID, member,
-							       StateData),
-					 case
-					   (NSD#state.config)#config.persistent
-					     of
-					   true ->
-					       mod_muc:store_room(NSD#state.server_host,
-								  NSD#state.host,
-								  NSD#state.room,
-								  make_opts(NSD));
-					   _ -> ok
-					 end,
-					 {next_state, normal_state, NSD};
-				     _ -> {next_state, normal_state, StateData}
-				   end;
-			       false -> {next_state, normal_state, StateData}
+					true ->
+						lists:foldl(
+							fun(IJID, StateData0) ->
+								case get_affiliation(IJID, StateData0) of
+									none ->
+										NSD = set_affiliation(IJID, member, StateData0),
+										case (NSD#state.config)#config.persistent of
+											true ->
+												mod_muc:store_room(
+													NSD#state.server_host,
+													NSD#state.host,
+													NSD#state.room,
+													make_opts(NSD)
+												);
+											_ -> ok
+										end,
+										{next_state, normal_state, NSD};
+									_ ->
+										{next_state, normal_state, StateData0}
+								end
+							end,
+							StateData,
+							IJIDs
+						);
+					false ->
+						{next_state, normal_state, StateData}
 			     end
 		       end;
 		   IsVoiceRequest ->
@@ -4349,103 +4355,129 @@ is_invitation(Els) ->
 
 check_invitation(From, Els, Lang, StateData) ->
     FAffiliation = get_affiliation(From, StateData),
-    CanInvite =
-	(StateData#state.config)#config.allow_user_invites
-	  orelse
-	  FAffiliation == admin orelse FAffiliation == owner,
-    InviteEl = case xml:remove_cdata(Els) of
-		 [#xmlel{name = <<"x">>, children = Els1} = XEl] ->
-		     case xml:get_tag_attr_s(<<"xmlns">>, XEl) of
-		       ?NS_MUC_USER -> ok;
-		       _ -> throw({error, ?ERR_BAD_REQUEST})
-		     end,
-		     case xml:remove_cdata(Els1) of
-		       [#xmlel{name = <<"invite">>} = InviteEl1] -> InviteEl1;
-		       _ -> throw({error, ?ERR_BAD_REQUEST})
-		     end;
-		 _ -> throw({error, ?ERR_BAD_REQUEST})
-	       end,
-    JID = case
-	    jlib:string_to_jid(xml:get_tag_attr_s(<<"to">>,
-						  InviteEl))
-	      of
-	    error -> throw({error, ?ERR_JID_MALFORMED});
-	    JID1 -> JID1
-	  end,
+    CanInvite = (StateData#state.config)#config.allow_user_invites
+		orelse FAffiliation == admin
+		orelse FAffiliation == owner,
     case CanInvite of
       false -> throw({error, ?ERR_NOT_ALLOWED});
       true ->
-	  Reason = xml:get_path_s(InviteEl,
-				  [{elem, <<"reason">>}, cdata]),
-	  ContinueEl = case xml:get_path_s(InviteEl,
-					   [{elem, <<"continue">>}])
-			   of
-			 <<>> -> [];
-			 Continue1 -> [Continue1]
-		       end,
-	  IEl = [#xmlel{name = <<"invite">>,
-			attrs = [{<<"from">>, jlib:jid_to_string(From)}],
-			children =
-			    [#xmlel{name = <<"reason">>, attrs = [],
-				    children = [{xmlcdata, Reason}]}]
-			      ++ ContinueEl}],
-	  PasswdEl = case
-		       (StateData#state.config)#config.password_protected
-			 of
-		       true ->
-			   [#xmlel{name = <<"password">>, attrs = [],
-				   children =
-				       [{xmlcdata,
-					 (StateData#state.config)#config.password}]}];
-		       _ -> []
-		     end,
-	  Body = #xmlel{name = <<"body">>, attrs = [],
-			children =
-			    [{xmlcdata,
-			      iolist_to_binary(
-                                [io_lib:format(
-                                  translate:translate(
+      	InviteEls = find_invite_elems(Els),
+      	%% Decode all JIDs first, so we fail early if any JID is invalid.
+        JIDs = lists:map(fun decode_destination_jid/1, InviteEls),
+        lists:foreach(
+			fun(InviteEl) ->
+				JID = decode_destination_jid(InviteEl),
+	  			Reason = xml:get_path_s(InviteEl, [{elem, <<"reason">>}, cdata]),
+	  			ContinueEl = case xml:get_path_s(InviteEl, [{elem, <<"continue">>}]) of
+					<<>> -> [];
+					Continue1 -> [Continue1]
+				end,
+				IEl = [#xmlel{name = <<"invite">>, attrs = [{<<"from">>, jlib:jid_to_string(From)}],
+				children = [#xmlel{name = <<"reason">>, attrs = [], children = [{xmlcdata, Reason}]}] ++ ContinueEl}],
+	  			PasswdEl = case (StateData#state.config)#config.password_protected of
+					true -> [
+						#xmlel{name = <<"password">>,
+						attrs = [],
+						children = [{xmlcdata, (StateData#state.config)#config.password}]}
+					];
+					_ -> []
+				end,
+				Body = #xmlel{
+					name = <<"body">>,
+					attrs = [],
+					children = [{
+						xmlcdata,
+						iolist_to_binary([
+							io_lib:format(
+								translate:translate(
                                     Lang,
                                     <<"~s invites you to the room ~s">>),
-                                  [jlib:jid_to_string(From),
-                                   jlib:jid_to_string({StateData#state.room,
-                                                       StateData#state.host,
-                                                       <<"">>})]),
-				
-				case
-				  (StateData#state.config)#config.password_protected
-				    of
-				  true ->
-				      <<", ",
-					(translate:translate(Lang,
-							     <<"the password is">>))/binary,
-					" '",
-					((StateData#state.config)#config.password)/binary,
-					"'">>;
-				  _ -> <<"">>
-				end
-				  ,
-				  case Reason of
-				    <<"">> -> <<"">>;
-				    _ -> <<" (", Reason/binary, ") ">>
-				  end])}]},
-	  Msg = #xmlel{name = <<"message">>,
-		       attrs = [{<<"type">>, <<"normal">>}],
-		       children =
-			   [#xmlel{name = <<"x">>,
-				   attrs = [{<<"xmlns">>, ?NS_MUC_USER}],
-				   children = IEl ++ PasswdEl},
-			    #xmlel{name = <<"x">>,
-				   attrs =
-				       [{<<"xmlns">>, ?NS_XCONFERENCE},
-					{<<"jid">>,
-					 jlib:jid_to_string({StateData#state.room,
-							     StateData#state.host,
-							     <<"">>})}],
-				   children = [{xmlcdata, Reason}]},
-			    Body]},
-	  ejabberd_router:route(StateData#state.jid, JID, Msg),
-	  JID
+									[
+										jlib:jid_to_string(From),
+										jlib:jid_to_string({
+											StateData#state.room,
+											StateData#state.host,
+											<<"">>
+										})
+									]
+								),
+							case (StateData#state.config)#config.password_protected of
+								true ->
+									<<", ",
+									(translate:translate(Lang, <<"the password is">>))/binary,
+									" '",
+									((StateData#state.config)#config.password)/binary,
+									"'">>;
+								_ -> <<"">>
+							end,
+				  			case Reason of
+								<<"">> -> <<"">>;
+								_ -> <<" (", Reason/binary, ") ">>
+							end
+						])
+					}]
+				},
+				Msg = #xmlel{
+					name = <<"message">>,
+					attrs = [{<<"type">>, <<"normal">>}],
+					children = [
+						#xmlel{
+							name = <<"x">>,
+							attrs = [{<<"xmlns">>, ?NS_MUC_USER}],
+							children = IEl ++ PasswdEl
+				   		},
+						#xmlel{
+							name = <<"x">>,
+							attrs = [
+								{<<"xmlns">>, ?NS_XCONFERENCE},
+								{
+									<<"jid">>,
+									jlib:jid_to_string({
+										StateData#state.room,
+										StateData#state.host,
+										<<"">>
+									})
+								}
+							],
+							children = [{xmlcdata, Reason}]
+						},
+						Body
+					]
+				},
+				ejabberd_router:route(StateData#state.jid, JID, Msg)
+			end, InviteEls
+		),
+		{ok, JIDs}
+	end.
+
+-spec decode_destination_jid(jlib:xmlel()) -> ejabberd:jid().
+decode_destination_jid(InviteEl) ->
+    case jlib:string_to_jid(xml:get_tag_attr_s(<<"to">>, InviteEl)) of
+		error -> throw({error, ?ERR_JID_MALFORMED});
+		JID1 -> JID1
+	end.
+
+-spec find_invite_elems([jlib:xmlel()]) -> ok | jlib:xmlel().
+find_invite_elems(Els) ->
+    case xml:remove_cdata(Els) of
+    [#xmlel{name = <<"x">>, children = Els1} = XEl] ->
+        case xml:get_tag_attr_s(<<"xmlns">>, XEl) of
+        ?NS_MUC_USER ->
+            ok;
+        _ ->
+            throw({error, ?ERR_BAD_REQUEST})
+        end,
+
+        InviteEls =
+            [InviteEl || #xmlel{name = <<"invite">>} = InviteEl <- Els1],
+        case InviteEls of
+            [_|_] ->
+                InviteEls;
+            _ ->
+                throw({error, ?ERR_BAD_REQUEST})
+        end;
+    _ ->
+        throw({error, ?ERR_BAD_REQUEST})
     end.
 
 %% Handle a message sent to the room by a non-participant.
@@ -4464,7 +4496,7 @@ handle_roommessage_from_nonparticipant(Packet, Lang,
 
 %% Check in the packet is a decline.
 %% If so, also returns the splitted packet.
-%% This function must be catched, 
+%% This function must be catched,
 %% because it crashes when the packet is not a decline message.
 check_decline_invitation(Packet) ->
     #xmlel{name = <<"message">>} = Packet,
@@ -4492,7 +4524,7 @@ send_decline_invitation({Packet, XEl, DEl, ToJID},
     Packet2 = replace_subelement(Packet, XEl2),
     ejabberd_router:route(RoomJID, ToJID, Packet2).
 
-%% Given an element and a new subelement, 
+%% Given an element and a new subelement,
 %% replace the instance of the subelement in element with the new subelement.
 replace_subelement(#xmlel{name = Name, attrs = Attrs,
 			  children = SubEls},
