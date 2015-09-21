@@ -283,7 +283,7 @@ normal_state({route, From, <<"">>,
 			     Config = StateData#state.config,
 			     case Config#config.members_only of
 					true ->
-						lists:foldl(
+						StateDataAcc = lists:foldl(
 							fun(IJID, StateData0) ->
 								case get_affiliation(IJID, StateData0) of
 									none ->
@@ -298,14 +298,15 @@ normal_state({route, From, <<"">>,
 												);
 											_ -> ok
 										end,
-										{next_state, normal_state, NSD};
+										NSD;
 									_ ->
-										{next_state, normal_state, StateData0}
+										StateData0
 								end
 							end,
 							StateData,
 							IJIDs
-						);
+						),
+						{next_state, normal_state, StateDataAcc};
 					false ->
 						{next_state, normal_state, StateData}
 			     end
