@@ -79,8 +79,8 @@ start(Host, Opts) ->
 				  ?NS_MAM_1, ?MODULE, process_iq_v0_3, IQDisc),
     gen_iq_handler:add_iq_handler(ejabberd_sm, Host,
 				  ?NS_MAM_1, ?MODULE, process_iq_v0_3, IQDisc),
-    ejabberd_hooks:add(user_receive_packet, Host, ?MODULE,
-                       user_receive_packet, 500),
+    %ejabberd_hooks:add(user_receive_packet, Host, ?MODULE,
+    %                   user_receive_packet, 500),
     ejabberd_hooks:add(user_send_packet, Host, ?MODULE,
                        user_send_packet, 500),
     ejabberd_hooks:add(muc_filter_message, Host, ?MODULE,
@@ -117,8 +117,8 @@ init_cache(_DBType, Opts) ->
 stop(Host) ->
     ejabberd_hooks:delete(user_send_packet, Host, ?MODULE,
 			  user_send_packet, 500),
-    ejabberd_hooks:delete(user_receive_packet, Host, ?MODULE,
-			  user_receive_packet, 500),
+    %ejabberd_hooks:delete(user_receive_packet, Host, ?MODULE,
+	%		  user_receive_packet, 500),
     ejabberd_hooks:delete(muc_filter_message, Host, ?MODULE,
 			  muc_filter_message, 50),
     ejabberd_hooks:delete(muc_process_iq, Host, ?MODULE,
@@ -185,11 +185,14 @@ user_receive_packet(Pkt, C2SState, JID, Peer, _To) ->
 user_send_packet(Pkt, C2SState, JID, Peer) ->
     LUser = JID#jid.luser,
     LServer = JID#jid.lserver,
+    LPeer = Peer#jid.luser,
     case should_archive(Pkt) of
 	true ->
             NewPkt = strip_my_archived_tag(Pkt, LServer),
 	    store_msg(C2SState, jlib:replace_from_to(JID, Peer, NewPkt),
 		      LUser, LServer, Peer, send),
+        store_msg(C2SState, jlib:replace_from_to(JID, Peer, NewPkt),
+              LPeer, LServer, JID, recv),
             NewPkt;
         false ->
             Pkt
