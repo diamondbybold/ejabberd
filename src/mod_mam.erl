@@ -188,11 +188,12 @@ user_send_packet(Pkt, C2SState, JID, Peer) ->
     LPeer = Peer#jid.luser,
     case should_archive(Pkt) of
 	true ->
-            NewPkt = strip_my_archived_tag(Pkt, LServer),
+            %NewPkt = strip_my_archived_tag(Pkt, LServer),
+            NewPkt = user_receive_packet(Pkt, C2SState, Peer, JID, LPeer),
 	    store_msg(C2SState, jlib:replace_from_to(JID, Peer, NewPkt),
 		      LUser, LServer, Peer, send),
-        store_msg(C2SState, jlib:replace_from_to(JID, Peer, NewPkt),
-              LPeer, LServer, JID, recv),
+        %store_msg(C2SState, jlib:replace_from_to(JID, Peer, NewPkt),
+        %      LPeer, LServer, JID, recv),
             NewPkt;
         false ->
             Pkt
